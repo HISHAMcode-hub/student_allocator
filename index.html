@@ -203,6 +203,7 @@ let page = 'dashboard';
 let editRoomId = null;
 let editStudentId = null;
 let examDate = '';
+let examSession = ''; // '', 'FN' or 'AN' — chosen with the exam date when allocating
 let allocStrategy = 'column'; // see ALLOC_ALGORITHMS below
 let pendingImport = null; // { type:'students'|'rooms', grid:[[...]], headerRow:1, headers:[...], rows:[...], mapping:{...}, schemaId:'' }
 const VIEWER_URL = 'https://hishamcode-hub.github.io/student_allocator/'; // fixed: hosted copy of this file that the QR code opens
@@ -217,6 +218,7 @@ async function loadAll(){
   students = await dbGet('students', []);
   run = await dbGet('allocation_run', null);
   examDate = await dbGet('exam_date', '');
+  examSession = await dbGet('exam_session', '');
   publish = await dbGet('publish', publish);
   includeQr = await dbGet('include_qr', true);
   allocStrategy = await dbGet('alloc_strategy', 'column');
@@ -1239,6 +1241,12 @@ function renderAllocate(){
     <div class="manual-grid" style="grid-template-columns:auto 1fr;max-width:320px;margin-bottom:.6rem">
       <label style="font-size:.82rem;font-weight:600;display:flex;align-items:center">Exam Date</label>
       <input type="date" id="exam-date" value="${esc(examDate)}" onchange="setExamDate(this.value)">
+      <label style="font-size:.82rem;font-weight:600;display:flex;align-items:center">Session</label>
+      <select id="exam-session" onchange="setExamSession(this.value)">
+        <option value="" ${examSession===''?'selected':''}>Room's own session</option>
+        <option value="FN" ${examSession==='FN'?'selected':''}>FN (Forenoon)</option>
+        <option value="AN" ${examSession==='AN'?'selected':''}>AN (Afternoon)</option>
+      </select>
     </div>
     <label style="display:flex;align-items:center;gap:.5rem;font-size:.82rem;font-weight:600;margin:.2rem 0 .8rem;cursor:pointer">
       <input type="checkbox" ${includeQr ? 'checked' : ''} onchange="setIncludeQr(this.checked)" style="width:auto">
@@ -1608,6 +1616,27 @@ async function setExamDate(v){
   examDate = v;
   await saveExamDate();
 }
+// Session (FN/AN) is applied to every room of the allocation; if one already exists it is updated at once.
+async function setExamSession(v){
+  examSession = (v === 'FN' || v === 'AN') ? v : '';
+  await dbSet('exam_session', examSession);
+  if(run && run.allocation){
+    run.allocation.forEach(rd => {
+      const orig = rooms.find(r => r.id === rd.room.id);
+      rd.room.session = examSession || (orig ? orig.session : '') || '';
+    });
+    await saveRun();
+  }
+  await rerenderKeepScroll();
+}
+// "Exam Date: 12 Sep 2026 · Session: FN" — shown in the header band of every PDF.
+function dateLineHtml(){
+  if(!examDate && !examSession) return '';
+  const parts = [];
+  if(examDate) parts.push('Exam Date: ' + esc(formatDate(examDate)));
+  if(examSession) parts.push('Session: ' + esc(examSession));
+  return `<div class="band-date">${parts.join(' &nbsp;·&nbsp; ')}</div>`;
+}
 async function runAllocationClick(){
   swapHistory.length = 0; selSeat = null;
   if(!rooms.length || !students.length){
@@ -1637,7 +1666,7 @@ async function runAllocationClick(){
         });
       });
     }
-    return { room: { id: room.id, name: room.name, session: room.session, groundFloor: !!room.groundFloor }, R: room.rows, C: room.cols, seats };
+    return { room: { id: room.id, name: room.name, session: examSession || room.session, groundFloor: !!room.groundFloor }, R: room.rows, C: room.cols, seats };
   }).filter(rd => rd.seats.length || true);
   // sort seats by col then row (matches original ORDER BY col_idx,row_idx) — already in that order since idx = row+col*R
 
@@ -1764,7 +1793,7 @@ function downloadExcelList(){
 // overwrite each other and are easy to sort/find later.
 function exportFileName(ext){
   const d = examDate || new Date().toISOString().slice(0,10);
-  return `${d}.${ext}`;
+  return `${d}${examSession ? '-' + examSession : ''}.${ext}`;
 }
 
 /* ===================== ONE QR for all rooms + phone viewer ===================== */
@@ -1908,7 +1937,7 @@ function printStudentList(){
           <div class="band-titles"><h1>GOVT. COLLEGE OF ENGINEERING, KANNUR</h1><p class="band-sub2">STUDENT-WISE SEATING LIST</p></div>
           <div class="band-logo-spacer"></div>
         </div>
-        ${examDate ? `<div class="band-date">Exam Date: ${esc(formatDate(examDate))}</div>` : ''}
+        ${dateLineHtml()}
       </div>
       <div class="cols">${tbl(chunk.slice(0,PER_COL))}${chunk.length>PER_COL ? tbl(chunk.slice(PER_COL)) : '<div></div>'}</div>
       <div class="footer-band"><span>Total students: ${list.length}</span><span>Page ${p+1} of ${nPages}</span></div>
@@ -2014,7 +2043,7 @@ function printExport(mode){
           </div>
           <div class="band-logo-spacer"></div>
         </div>
-        ${examDate ? `<div class="band-date">Exam Date: ${esc(formatDate(examDate))}</div>` : ''}
+        ${dateLineHtml()}
         ${qrSvg ? `<div class="band-qr"><span class="qrtxt">Scan to find<br>your room<br>&amp; seat</span><span class="qrbox"><span class="qr">${qrSvg}</span></span></div>` : ''}
       </div>
       <div class="room-banner">
@@ -2039,7 +2068,7 @@ function printExport(mode){
         </div>
         <div class="band-logo-spacer"></div>
       </div>
-      ${examDate ? `<div class="band-date">Exam Date: ${esc(formatDate(examDate))}</div>` : ''}
+      ${dateLineHtml()}
     </div>
     <div class="bigqr-wrap">
       <div class="bigqr-title">Find your room &amp; seat</div>
@@ -2083,7 +2112,7 @@ function printExport(mode){
         </div>
         <div class="band-logo-spacer"></div>
       </div>
-      ${examDate ? `<div class="band-date">Exam Date: ${esc(formatDate(examDate))}</div>` : ''}
+      ${dateLineHtml()}
     </div>
     <h3>Room Utilization</h3>
     <table class="sumtable">
@@ -2193,7 +2222,7 @@ function printExport(mode){
 /* ===================== database reset ===================== */
 async function resetDatabase(){
   if(!confirm('This deletes ALL rooms, students, and the allocation result stored in this browser. Continue?')) return;
-  rooms = []; students = []; run = null; examDate = ''; publish = { enabled: false, mode: 'now', publishAt: null };
+  rooms = []; students = []; run = null; examDate = ''; examSession = ''; dbSet('exam_session',''); publish = { enabled: false, mode: 'now', publishAt: null };
   await Promise.all([saveRooms(), saveStudents(), saveRun(), saveExamDate(), savePublish()]);
   render();
 }
