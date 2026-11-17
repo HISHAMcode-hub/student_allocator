@@ -200,7 +200,8 @@ let editStudentId = null;
 let examDate = '';
 let allocStrategy = 'column'; // see ALLOC_ALGORITHMS below
 let pendingImport = null; // { type:'students'|'rooms', grid:[[...]], headerRow:1, headers:[...], rows:[...], mapping:{...}, schemaId:'' }
-let viewerUrl = ''; // web address where this same file is hosted; QR codes on room sheets open it
+const VIEWER_URL = 'https://hishamcode-hub.github.io/student_allocator/'; // fixed: hosted copy of this file that the QR code opens
+let viewerUrl = VIEWER_URL;
 let publish = { enabled: false, mode: 'now', publishAt: null };
 async function savePublish(){ await dbSet('publish', publish); }
 let importSchemas = { students: [], rooms: [] }; // named, reusable column mappings per file "shape"
@@ -210,7 +211,6 @@ async function loadAll(){
   students = await dbGet('students', []);
   run = await dbGet('allocation_run', null);
   examDate = await dbGet('exam_date', '');
-  viewerUrl = await dbGet('viewer_url', '');
   publish = await dbGet('publish', publish);
   allocStrategy = await dbGet('alloc_strategy', 'column');
   importSchemas = await dbGet('import_schemas', { students: [], rooms: [] });
@@ -222,7 +222,6 @@ async function saveRooms(){ await dbSet('rooms', rooms); }
 async function saveStudents(){ await dbSet('students', students); }
 async function saveRun(){ await dbSet('allocation_run', run); }
 async function saveExamDate(){ await dbSet('exam_date', examDate); }
-async function setViewerUrl(v){ viewerUrl = String(v||'').trim(); await dbSet('viewer_url', viewerUrl); }
 async function saveAllocStrategy(){ await dbSet('alloc_strategy', allocStrategy); }
 async function setAllocStrategy(v){ allocStrategy = v; await saveAllocStrategy(); render(); }
 async function saveImportSchemas(){ await dbSet('import_schemas', importSchemas); }
@@ -1233,11 +1232,6 @@ function renderAllocate(){
       <label style="font-size:.82rem;font-weight:600;display:flex;align-items:center">Exam Date</label>
       <input type="date" id="exam-date" value="${esc(examDate)}" onchange="setExamDate(this.value)">
     </div>
-    <div class="manual-grid" style="grid-template-columns:auto 1fr;max-width:640px;margin-bottom:.2rem">
-      <label style="font-size:.82rem;font-weight:600;display:flex;align-items:center">QR Viewer Link</label>
-      <input type="url" id="viewer-url" placeholder="https://your-site/index.html  (optional)" value="${esc(viewerUrl)}" onchange="setViewerUrl(this.value)">
-    </div>
-    <div style="font-size:.72rem;color:var(--text3);margin-bottom:.8rem;max-width:640px">Host this same file online (GitHub Pages, college server…) and paste its address here. The Display PDF then gets one QR code, the same on every room page, that opens a phone page where students type their register number to see their room and seat. Without this link the Display PDF is printed without a QR code.</div>
     <div class="row-actions">
       <button class="btn btn-primary" onclick="runAllocationClick()" ${(!roomCount||!studentCount) ? 'disabled' : ''}>⚡ Run Allocation</button>
       ${run ? `
