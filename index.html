@@ -2027,6 +2027,27 @@ function printExport(mode){
     </div>`;
   });
 
+  // Display PDF: final page with one big QR code
+  const qrPage = (isDisplay && qrSvg) ? `
+  <div class="page qrpage">
+    <div class="band">
+      <div class="band-top">
+        <img class="band-logo" src="${COLLEGE_LOGO}" alt="College logo">
+        <div class="band-titles">
+          <h1>GOVT. COLLEGE OF ENGINEERING, KANNUR</h1>
+          <p class="band-sub2">EXAMINATION SEATING ARRANGEMENT</p>
+        </div>
+        <div class="band-logo-spacer"></div>
+      </div>
+      ${examDate ? `<div class="band-date">Exam Date: ${esc(formatDate(examDate))}</div>` : ''}
+    </div>
+    <div class="bigqr-wrap">
+      <div class="bigqr-title">Find your room &amp; seat</div>
+      <div class="bigqr-sub">Scan the QR code with your phone camera and enter your register number</div>
+      <div class="bigqr">${qrSvg}</div>
+    </div>
+  </div>` : '';
+
   const courseCounts = {};
   allocation.forEach(rd => rd.seats.forEach(seat => { if(seat.regno) courseCounts[seat.course]=(courseCounts[seat.course]||0)+1; }));
   const entries = Object.entries(courseCounts).sort((a,b)=>b[1]-a[1]);
@@ -2134,6 +2155,14 @@ function printExport(mode){
   .rp-session{font-weight:normal;font-size:9px;color:#666}
   .rp-total-row td{font-weight:bold;background:#f2efe8}
   .toolbar{padding:10px 14px;background:#f2efe8}
+  .qrpage .band-top{padding-right:0}
+  .qrpage .band-logo-spacer{display:block}
+  .qrpage .band{min-height:0}
+  .bigqr-wrap{text-align:center;padding:14mm 10mm 0}
+  .bigqr-title{font-size:30px;font-weight:bold;color:#1a3a5c}
+  .bigqr-sub{font-size:15px;color:#444;margin:6px 0 14mm}
+  .bigqr{width:130mm;margin:0 auto;padding:5mm;border:2px solid #1a3a5c;border-radius:6px}
+  .bigqr svg{width:100%;height:auto;display:block}
   @media print{.toolbar{display:none}}
   ${(isDisplay && qrSvg) ? `
   .band-top{padding-right:52mm}
@@ -2153,6 +2182,7 @@ function printExport(mode){
   </style></head><body>
   <div class="toolbar"><button onclick="window.print()" style="padding:8px 16px;font-weight:bold;cursor:pointer">🖨 Print / Save as PDF</button></div>
   ${pages}
+  ${qrPage}
   ${isDisplay ? '' : summaryPage}
   </body></html>`;
 
