@@ -118,6 +118,11 @@ table.data-table td form{display:inline}
 .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--border2);border-top-color:var(--accent2);border-radius:50%;animation:sp .7s linear infinite;vertical-align:middle;margin-right:.4rem}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media(max-width:600px){.steps{grid-template-columns:1fr}.manual-grid{grid-template-columns:1fr 1fr}header .container{padding:0 .5rem}}
+  .seat[draggable=true]{cursor:grab}
+  .seat.sel{outline:3px solid #c9a227;outline-offset:-2px;box-shadow:0 0 0 3px rgba(201,162,39,.25)}
+  .seat.dragover{outline:3px dashed var(--accent2);outline-offset:-2px;background:var(--accent-light)!important}
+  .seat.dragging{opacity:.4}
+  .swap-hint{font-size:.78rem;color:var(--text2);background:var(--gold-light);border:1px solid #ecd98f;border-radius:8px;padding:.5rem .8rem;margin:.2rem 0 .9rem;display:flex;align-items:center;gap:.8rem;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -202,6 +207,7 @@ let allocStrategy = 'column'; // see ALLOC_ALGORITHMS below
 let pendingImport = null; // { type:'students'|'rooms', grid:[[...]], headerRow:1, headers:[...], rows:[...], mapping:{...}, schemaId:'' }
 const VIEWER_URL = 'https://hishamcode-hub.github.io/student_allocator/'; // fixed: hosted copy of this file that the QR code opens
 let viewerUrl = VIEWER_URL;
+let includeQr = true; // option: print the QR code on the Display PDF
 let publish = { enabled: false, mode: 'now', publishAt: null };
 async function savePublish(){ await dbSet('publish', publish); }
 let importSchemas = { students: [], rooms: [] }; // named, reusable column mappings per file "shape"
@@ -212,6 +218,7 @@ async function loadAll(){
   run = await dbGet('allocation_run', null);
   examDate = await dbGet('exam_date', '');
   publish = await dbGet('publish', publish);
+  includeQr = await dbGet('include_qr', true);
   allocStrategy = await dbGet('alloc_strategy', 'column');
   importSchemas = await dbGet('import_schemas', { students: [], rooms: [] });
   if(!importSchemas.students) importSchemas.students = [];
@@ -222,6 +229,7 @@ async function saveRooms(){ await dbSet('rooms', rooms); }
 async function saveStudents(){ await dbSet('students', students); }
 async function saveRun(){ await dbSet('allocation_run', run); }
 async function saveExamDate(){ await dbSet('exam_date', examDate); }
+async function setIncludeQr(v){ includeQr = !!v; await dbSet('include_qr', includeQr); }
 async function saveAllocStrategy(){ await dbSet('alloc_strategy', allocStrategy); }
 async function setAllocStrategy(v){ allocStrategy = v; await saveAllocStrategy(); render(); }
 async function saveImportSchemas(){ await dbSet('import_schemas', importSchemas); }
@@ -1232,6 +1240,10 @@ function renderAllocate(){
       <label style="font-size:.82rem;font-weight:600;display:flex;align-items:center">Exam Date</label>
       <input type="date" id="exam-date" value="${esc(examDate)}" onchange="setExamDate(this.value)">
     </div>
+    <label style="display:flex;align-items:center;gap:.5rem;font-size:.82rem;font-weight:600;margin:.2rem 0 .8rem;cursor:pointer">
+      <input type="checkbox" ${includeQr ? 'checked' : ''} onchange="setIncludeQr(this.checked)" style="width:auto">
+      Include QR code in Display PDF <span style="font-weight:400;color:var(--text3)">(students scan it to find their room &amp; seat)</span>
+    </label>
     <div class="row-actions">
       <button class="btn btn-primary" onclick="runAllocationClick()" ${(!roomCount||!studentCount) ? 'disabled' : ''}>⚡ Run Allocation</button>
       ${run ? `
@@ -1264,6 +1276,8 @@ function renderAllocate(){
       <div class="legend">
         ${courses.map(c=>`<div class="legend-item"><div class="legend-swatch" style="background:${courseColorMap[c]}"></div><span>${esc(c)}</span></div>`).join('')}
       </div>
+      <div class="swap-hint"><span>✋ <b>Edit seating:</b> drag a student onto another seat to swap (drop on an empty seat to move). On a phone, tap one seat then another. Works across rooms; the PDFs use the edited seating.</span>
+        <button class="btn btn-ghost btn-sm" onclick="undoSwap()" ${swapHistory.length ? '' : 'disabled'}>↶ Undo last move${swapHistory.length ? ' ('+swapHistory.length+')' : ''}</button></div>
       <div class="rooms-grid">
         ${allocation.map(rd => renderRoomGridCard(rd, courseColorMap)).join('')}
       </div>
@@ -1300,6 +1314,68 @@ function renderAllocate(){
   return body;
 }
 
+/* ===================== drag & swap seats ===================== */
+const swapHistory = [];   // [{a,b}] — for undo
+let selSeat = null;       // tap-to-swap selection {room,r,c}
+const SEAT_FIELDS = ['course','regno','name','groundFloor'];
+function seatLookup(pos){
+  const rd = (run?.allocation||[]).find(x => String(x.room.id) === String(pos.room));
+  if(!rd) return null;
+  const seat = rd.seats.find(x => x.row_idx === +pos.r && x.col_idx === +pos.c);
+  return seat ? { rd, seat } : null;
+}
+function swapRaw(a,b){
+  const A = seatLookup(a), B = seatLookup(b);
+  if(!A || !B || A.seat === B.seat) return false;
+  SEAT_FIELDS.forEach(f => { const t = A.seat[f]; A.seat[f] = B.seat[f]; B.seat[f] = t; });
+  return true;
+}
+async function rerenderKeepScroll(){ const y = window.scrollY; await render(); window.scrollTo(0, y); }
+async function moveSeat(a,b){
+  const A = seatLookup(a), B = seatLookup(b);
+  if(!A || !B || A.seat === B.seat) return;
+  if(!A.seat.regno && !B.seat.regno) return;
+  // ground-floor students must not be moved to a non-ground-floor room without a warning
+  const warn = [];
+  if(A.seat.regno && A.seat.groundFloor && !B.rd.room.groundFloor) warn.push(`${A.seat.regno} needs ground floor but Room ${B.rd.room.name} is not marked ground floor.`);
+  if(B.seat.regno && B.seat.groundFloor && !A.rd.room.groundFloor) warn.push(`${B.seat.regno} needs ground floor but Room ${A.rd.room.name} is not marked ground floor.`);
+  if(warn.length && !confirm(warn.join('\n') + '\n\nMove anyway?')){ selSeat = null; return rerenderKeepScroll(); }
+  swapRaw(a,b);
+  swapHistory.push({ a, b });
+  selSeat = null;
+  await saveRun();
+  await rerenderKeepScroll();
+}
+async function undoSwap(){
+  const last = swapHistory.pop();
+  if(!last) return;
+  swapRaw(last.a, last.b);
+  selSeat = null;
+  await saveRun();
+  await rerenderKeepScroll();
+}
+function seatDragStart(ev, room, r, c){
+  window.__drag = { room, r, c };
+  ev.dataTransfer.effectAllowed = 'move';
+  try{ ev.dataTransfer.setData('text/plain', room+','+r+','+c); }catch(e){}
+  ev.currentTarget.classList.add('dragging');
+}
+function seatDragEnd(ev){ ev.currentTarget.classList.remove('dragging'); document.querySelectorAll('.seat.dragover').forEach(e=>e.classList.remove('dragover')); }
+function seatDragOver(ev){ ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; ev.currentTarget.classList.add('dragover'); }
+function seatDragLeave(ev){ ev.currentTarget.classList.remove('dragover'); }
+function seatDrop(ev, room, r, c){
+  ev.preventDefault();
+  ev.currentTarget.classList.remove('dragover');
+  const from = window.__drag; window.__drag = null;
+  if(from) moveSeat(from, { room, r, c });
+}
+function seatClick(room, r, c){
+  const pos = { room, r, c };
+  if(!selSeat){ selSeat = pos; return rerenderKeepScroll(); }
+  if(String(selSeat.room)===String(room) && selSeat.r===r && selSeat.c===c){ selSeat = null; return rerenderKeepScroll(); }
+  moveSeat(selSeat, pos);
+}
+
 function renderRoomGridCard(rd, courseColorMap){
   const room = rd.room, R = rd.R, C = rd.C;
   const byPos = {};
@@ -1316,15 +1392,17 @@ function renderRoomGridCard(rd, courseColorMap){
     for(let c=0;c<C;c++){
       const seat = byPos[`${c}_${r}`];
       const sid = seatId(r,c);
+      const isSel = selSeat && String(selSeat.room)===String(room.id) && selSeat.r===r && selSeat.c===c;
+      const dnd = `data-room="${room.id}" ondragover="seatDragOver(event)" ondragleave="seatDragLeave(event)" ondrop="seatDrop(event,${room.id},${r},${c})" onclick="seatClick(${room.id},${r},${c})"`;
       if(seat && seat.regno){
         const col = courseColorMap[seat.course] || '#aaa';
-        cells += `<div class="seat filled" style="width:${cellW}px;min-width:${cellW}px;background:${hexLight(col)};border-color:${col}">
+        cells += `<div class="seat filled${isSel?' sel':''}" draggable="true" ondragstart="seatDragStart(event,${room.id},${r},${c})" ondragend="seatDragEnd(event)" ${dnd} title="Drag onto another seat to swap" style="width:${cellW}px;min-width:${cellW}px;background:${hexLight(col)};border-color:${col}">
           <div class="seat-sid">${sid}</div>
           <div class="seat-reg">${esc(seat.regno)}</div>
           <div class="seat-sub" style="background:${col}">${esc(seat.course)}</div>
         </div>`;
       } else {
-        cells += `<div class="seat empty" style="width:${cellW}px;min-width:${cellW}px"><div class="seat-sid">${sid}</div></div>`;
+        cells += `<div class="seat empty${isSel?' sel':''}" ${dnd} title="Drop a student here to move" style="width:${cellW}px;min-width:${cellW}px"><div class="seat-sid">${sid}</div></div>`;
       }
     }
     rowsHtml += `<div class="seat-row"><div class="row-lbl">${ALPHA[r]}</div>${cells}</div>`;
@@ -1531,6 +1609,7 @@ async function setExamDate(v){
   await saveExamDate();
 }
 async function runAllocationClick(){
+  swapHistory.length = 0; selSeat = null;
   if(!rooms.length || !students.length){
     window.__allocNotice = 'Add at least one room and one student before running allocation.';
     render();
@@ -1874,7 +1953,7 @@ function printExport(mode){
   if(!run) return;
   // One QR code (same on every page) covering all rooms — Display PDF only.
   let qrSvg = '';
-  if(isDisplay){
+  if(isDisplay && includeQr){
     const q = buildAllRoomsQr(run.allocation || []);
     if(q.svg) qrSvg = q.svg;
     else if(!confirm(q.err + '\n\nPrint the Display PDF without a QR code?')) return;
@@ -1885,6 +1964,7 @@ function printExport(mode){
   let pages = '';
   allocation.forEach(rd => {
     const room = rd.room, R = rd.R, C = rd.C;
+    const rowH = (isDisplay && qrSvg) ? Math.max(50, 78 - Math.round(62 / Math.max(R,1))) : 78; // shave the grid a little to pay for the QR footer
     const byPos = {};
     rd.seats.forEach(seat => { byPos[`${seat.col_idx}_${seat.row_idx}`] = seat; });
     const used = rd.seats.filter(s=>s.regno).length;
@@ -1917,7 +1997,7 @@ function printExport(mode){
             <div class="seat-sub" style="background:${col}">${esc(seat.course)}</div>
           </td>`;
         } else {
-          rowsHtml += `<td class="seat-empty">${sid}<br>EMPTY</td>`;
+          rowsHtml += `<td class="seat-empty">${sid}</td>`;
         }
       }
       rowsHtml += `</tr>`;
@@ -1938,12 +2018,11 @@ function printExport(mode){
       </div>
       <div class="room-banner">
         <h2>ROOM ${esc(room.name)}${room.session ? ' • Session: '+esc(room.session) : ''}</h2>
-        ${qrSvg ? `<div class="qrbox"><div class="qr">${qrSvg}</div><div class="qrcap">Scan to find your room &amp; seat</div></div>` : ''}
       </div>
       <div class="legend">${roomCourses.map(c=>`<span style="background:${courseColorMap[c]||'#555'}">${esc(c)}</span>`).join('')}</div>
-      <div class="grid"><table class="seatgrid">${rowsHtml}</table></div>
+      <div class="grid"><table class="seatgrid" style="--rh:${rowH}px">${rowsHtml}</table></div>
       ${isDisplay ? '' : attnHtml}
-      <div class="footer-band"><span>Govt. College of Engineering, Kannur</span><span>Seats: ${used}/${R*C}</span></div>
+      <div class="footer-band"><span>Govt. College of Engineering, Kannur</span><span class="fb-right"><span>Seats: ${used}/${R*C}</span>${qrSvg ? `<span class="qrtxt">Scan to find your<br>room &amp; seat &#9654;</span><span class="qrbox"><span class="qr">${qrSvg}</span></span>` : ''}</span></div>
     </div>`;
   });
 
@@ -2020,9 +2099,11 @@ function printExport(mode){
   .band-date{text-align:center;font-size:16px;font-weight:bold;color:#f5d67a;margin-top:6px;letter-spacing:.03em}
   .room-banner{background:#ebf1fa;border-bottom:2px solid #1a3a5c;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px}
   .room-banner h2{color:#1a3a5c;font-size:17px}
-  .qrbox{width:26mm;text-align:center;flex-shrink:0}
+  .fb-right{display:flex;align-items:center;gap:10px}
+  .qrtxt{font-size:8px;line-height:1.3;text-align:right;color:#fff}
+  .qrbox{display:block;width:22mm;background:#fff;padding:1.2mm;flex-shrink:0}
+  .qr{display:block}
   .qr svg{width:100%;height:auto;display:block}
-  .qrcap{font-size:7px;color:#444;margin-top:2px}
   .legend{display:flex;gap:5px;flex-wrap:wrap;padding:8px 14px}
   .legend span{font-size:10px;color:#fff;padding:3px 9px;border-radius:8px;font-weight:bold}
   .grid{padding:10px 14px}
@@ -2054,14 +2135,13 @@ function printExport(mode){
   @media print{.toolbar{display:none}}
   ${isDisplay ? `
   .page{padding:10mm 10mm}
-  table.seatgrid td{height:78px}
+  table.seatgrid td{height:var(--rh,78px)}
   .seat-sid{font-size:12px;color:#555}
   .seat-reg{font-size:15px;margin:5px 0}
   .seat-sub{font-size:11px;padding:2px 6px}
   .seat-empty{font-size:12px;padding-top:26px}
   .room-banner h2{font-size:22px}
-  .qrbox{width:34mm}
-  .qrcap{font-size:9px}
+  .footer-band{padding-top:3px;padding-bottom:3px;align-items:center}
   .legend span{font-size:12px}
   ` : ''}
   </style></head><body>
