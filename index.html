@@ -2141,27 +2141,25 @@ function printStudentList(){
   const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${esc(exportFileName('pdf').replace(/\.pdf$/,''))}-students</title>
   <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:Arial,Helvetica,sans-serif;color:#1a1916;background:#fff}
+  body{font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff;-webkit-print-color-adjust:economy;print-color-adjust:economy}
   .page{page-break-after:always;padding:10mm 10mm}
   .page:last-child{page-break-after:auto}
-  .band{background:#1a3a5c;color:#fff;padding:10px 14px;border-bottom:3px solid #c9a227}
+  .band{padding:4px 2px 6px;border-bottom:1.5px solid #000}
   .band-top{display:flex;align-items:center;gap:12px;justify-content:center}
-  .band-logo,.band-logo-spacer{width:44px;height:44px;flex-shrink:0}
-  .band-logo{background:#fff;border-radius:6px;object-fit:contain;padding:2px}
+  .band-logo,.band-logo-spacer{width:38px;height:38px;flex-shrink:0}
+  .band-logo{object-fit:contain;filter:grayscale(1) contrast(1.2)}
   .band-titles{text-align:center;flex:1}
   .band h1{font-size:16px;letter-spacing:.03em}
-  .band-sub2{font-size:10px;opacity:.8;margin-top:3px;letter-spacing:.05em}
-  .band-date{text-align:center;font-size:14px;font-weight:bold;color:#f5d67a;margin-top:5px}
+  .band-sub2{font-size:10px;margin-top:3px;letter-spacing:.05em}
+  .band-date{text-align:center;font-size:14px;font-weight:bold;margin-top:5px}
   .cols{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:8px 0}
   table.sl{width:100%;border-collapse:collapse;font-size:11.5px}
-  table.sl th{background:#ebf1fa;color:#1a3a5c;text-align:left;padding:5px 7px;border:1px solid #c9d4e6;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
-  table.sl td{padding:0 7px;height:5.6mm;border:1px solid #dde2ea}
-  table.sl tr:nth-child(even) td{background:#f6f8fc}
-  td.rg{font-weight:bold}
-  td.st{font-weight:bold;text-align:center;color:#1a3a5c}
-  .ss{font-size:9px;color:#666}
-  .footer-band{background:#1a3a5c;color:#cfe;font-size:9px;padding:6px 14px;display:flex;justify-content:space-between}
-  .toolbar{padding:10px 14px;background:#f2efe8}
+  table.sl th{text-align:left;padding:5px 7px;border-bottom:1px solid #000;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+  table.sl td{padding:0 7px;height:5.6mm;border-bottom:.4px solid #aaa}
+  td.st{text-align:center}
+  .ss{font-size:9px}
+  .footer-band{border-top:.5px solid #000;font-size:9px;padding:6px 2px;display:flex;justify-content:space-between}
+  .toolbar{padding:10px 14px}
   @media print{.toolbar{display:none}}
   </style></head><body>
   <div class="toolbar"><button onclick="window.print()" style="padding:8px 16px;font-weight:bold;cursor:pointer">🖨 Print / Save as PDF</button></div>
@@ -2190,7 +2188,6 @@ function printExport(mode){
     else if(!confirm(q.err + '\n\nPrint the Display PDF without a QR code?')) return;
   }
   const { allocation, courses } = buildDisplayAllocation();
-  const colorMap = courseColors(courses);
   const titleLine = [dotDate(examDate), examSession].filter(Boolean).join(' ');
   const subjName = {};
   allocation.forEach(rd => rd.seats.forEach(s => { if(s.course && s.subject && !subjName[s.course]) subjName[s.course] = s.subject; }));
@@ -2216,13 +2213,14 @@ function printExport(mode){
     const counts = {};
     rd.seats.forEach(s => { if(s.regno) counts[s.course] = (counts[s.course] || 0) + 1; });
     const entries = Object.entries(counts).sort((a,b) => b[1] - a[1]);
+    const multi = entries.length > 1;   // B&W: course code is printed in each seat instead of a colour
     const avail = isDisplay ? 204 : 138;                       // mm available for the grid
     const rowH = Math.max(6.5, Math.min(isDisplay ? 30 : 18, (avail - (R + 1) * 2.2) / Math.max(R, 1)));
     const compact = rowH < 12;
     // font size that keeps the longest reg. no. on ONE line inside a cell
     const cellW = (190 - 4 - (C + 1) * 2.2) / Math.max(C, 1);          // mm
     const maxLen = Math.max(8, ...rd.seats.map(x => String(x.regno || '').length));
-    const inner = cellW - 6 - (compact ? 7 : 0);                         // minus border/padding (and the inline label)
+    const inner = cellW - 6 - (compact ? (multi ? 18 : 7) : 0);                         // minus border/padding (and the inline label)
     const fs = Math.max(7, Math.min(isDisplay ? 17 : 13.5, (inner / (maxLen * 0.64)) * 3.78));
     let rows = '';
     for(let r = 0; r < R; r++){
@@ -2230,15 +2228,15 @@ function printExport(mode){
       for(let c = 0; c < C; c++){
         const seat = seatAt(rd, r, c), sid = seatId(r, c);
         if(seat && seat.regno){
-          const col = colorMap[seat.course] || '#888';
-          cells += `<td class="${compact ? 'cp' : ''}" style="--c:${col};background:${hexLight(col)}"><span class="sl">${sid}</span><span class="rg">${esc(seat.regno)}</span></td>`;
+          const cc = multi ? '<span class="cc">' + esc(seat.course || '') + '</span>' : '';
+          cells += `<td class="${compact ? 'cp' : ''}"><span class="sl">${sid}${cc}</span><span class="rg">${esc(seat.regno)}</span></td>`;
         } else {
           cells += `<td class="em"><span class="sl">${sid}</span></td>`;
         }
       }
       rows += `<tr style="height:${rowH.toFixed(1)}mm">${cells}</tr>`;
     }
-    const legend = entries.map(([c,n]) => `<span class="chip" style="--c:${colorMap[c] || '#555'}"><b>${esc(c)}</b> · ${n}</span>`).join('');
+    const legend = entries.map(([c,n]) => `<span class="chip"><b>${esc(c)}</b> · ${n}</span>`).join('');
     const attn = isDisplay ? '' : `
       <div class="attn-wrap">
         <table class="attn">
@@ -2333,84 +2331,73 @@ function printExport(mode){
   @page chart{size:A4 portrait;margin:8mm}
   @page roll{size:A4 landscape;margin:8mm}
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:Arial,Helvetica,sans-serif;color:#1a1916;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  /* Ink-saver: black on white only, no fills, hairline rules */
+  body{font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff;-webkit-print-color-adjust:economy;print-color-adjust:economy}
   .page{break-after:page}
   .page:last-child{break-after:auto}
   .page.chart{page:chart}
   .page.roll{page:roll}
-  .toolbar{padding:10px 14px;background:#f2efe8}
+  .toolbar{padding:10px 14px}
   @media print{.toolbar{display:none}}
-
-  /* header band: college, date + session (big), exam name */
-  .band{position:relative;background:linear-gradient(135deg,#12304f,#1a3a5c 60%,#24507a);color:#fff;padding:9px 14px;border-bottom:3px solid #c9a227;border-radius:6px 6px 0 0}
+  .band{position:relative;padding:4px 2px 6px;border-bottom:1.5px solid #000}
   .band-top{display:flex;align-items:center;gap:12px}
-  .band-logo{width:46px;height:46px;background:#fff;border-radius:6px;object-fit:contain;padding:2px;flex-shrink:0}
+  .band-logo{width:38px;height:38px;object-fit:contain;flex-shrink:0;filter:grayscale(1) contrast(1.2)}
   .band-titles{flex:1;text-align:center}
-  .clg{font-size:11px;letter-spacing:.09em;opacity:.85}
-  .dt{font-size:24px;font-weight:bold;color:#f5d67a;letter-spacing:.05em;margin-top:2px}
-  .en{font-size:11.5px;opacity:.92;margin-top:2px}
+  .clg{font-size:11px;letter-spacing:.09em}
+  .dt{font-size:24px;font-weight:bold;letter-spacing:.05em;margin-top:2px}
+  .en{font-size:11.5px;margin-top:2px}
   .band.hasqr{min-height:29mm}
   .band.hasqr .band-top{padding-right:52mm}
-  .band-qr{position:absolute;right:12px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:8px}
-  .qrtxt{font-size:11px;font-weight:bold;line-height:1.3;text-align:right;color:#f5d67a;letter-spacing:.02em}
-  .qrbox{display:block;width:25mm;background:#fff;padding:1.2mm;flex-shrink:0;border-radius:2px}
+  .band-qr{position:absolute;right:2px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:8px}
+  .qrtxt{font-size:11px;font-weight:bold;line-height:1.3;text-align:right}
+  .qrbox{display:block;width:25mm;background:#fff;padding:1.2mm;flex-shrink:0}
   .qr{display:block}
   .qr svg{width:100%;height:auto;display:block}
-
-  /* room strip + legend */
-  .roomstrip{display:flex;align-items:center;justify-content:center;gap:12px;background:#ebf1fa;border-bottom:2px solid #1a3a5c;padding:6px 14px}
-  .rl{font-size:12px;letter-spacing:.22em;color:#1a3a5c;font-weight:bold}
-  .rn{font-size:30px;font-weight:bold;color:#fff;background:#1a3a5c;padding:0 18px;border-radius:8px;line-height:1.35;border:2px solid #c9a227}
-  .meta{font-size:11px;color:#555}
+  .roomstrip{display:flex;align-items:center;justify-content:center;gap:12px;border-bottom:1px solid #000;padding:6px 14px}
+  .rl{font-size:12px;letter-spacing:.22em;font-weight:bold}
+  .rn{font-size:30px;font-weight:bold;padding:0 18px;border-radius:8px;line-height:1.35;border:2px solid #000}
+  .meta{font-size:11px}
   .legend{display:flex;gap:5px;flex-wrap:wrap;justify-content:center;padding:6px 14px 2px}
-  .chip{font-size:10px;color:#fff;background:var(--c);padding:2px 10px;border-radius:9px}
-
-  /* seat grid: seat label (A1, B1 ...) with the reg. no. beneath */
+  .chip{font-size:10px;border:1px solid #000;padding:1px 9px;border-radius:9px}
   table.seatgrid{width:calc(100% - 4mm);margin:0 2mm;border-collapse:separate;border-spacing:2.2mm;table-layout:fixed}
-  table.seatgrid td{border:1px solid var(--c,#ddd);border-left:4px solid var(--c,#ddd);border-radius:4px;padding:1mm 2mm;vertical-align:middle;overflow:hidden}
-  table.seatgrid td.em{border:1px dashed #ccc;background:#fff}
-  .sl{display:block;font-size:8.5px;font-weight:bold;color:var(--c,#999)}
+  table.seatgrid td{border:.8px solid #000;border-radius:4px;padding:1mm 2mm;vertical-align:middle;overflow:hidden}
+  table.seatgrid td.em{border:.6px dashed #aaa}
+  .sl{display:flex;justify-content:space-between;font-size:8.5px;color:#333}
+  .cc{font-size:7px;margin-left:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .rg{display:block;font-size:var(--fs,12px);font-weight:bold;white-space:nowrap;letter-spacing:.01em}
   td.cp .sl,td.cp .rg{display:inline}
   td.cp .sl{margin-right:6px}
+  td.cp .cc{margin-left:3px}
   .dsp .sl{font-size:10px}
-
-  /* attendance block (As-is PDF) */
   .attn-wrap{padding:3mm 4mm 0;break-inside:avoid}
   table.attn{width:68%;border-collapse:collapse;font-size:11px}
-  table.attn th,table.attn td{border:1.5px solid #222;padding:6px 8px;text-align:left}
+  table.attn th,table.attn td{border:1px solid #000;padding:6px 8px;text-align:left}
   table.attn td{height:8mm}
   table.attn td.c{text-align:center}
   table.attn tr.sig td{height:14mm;font-weight:bold}
   .note{font-size:11px;font-weight:bold;margin-top:5px}
-  .footer{display:flex;justify-content:space-between;background:#1a3a5c;color:#cfe;font-size:9px;padding:5px 14px;margin-top:3mm;border-radius:0 0 6px 6px}
-
-  /* roll list */
+  .footer{display:flex;justify-content:space-between;border-top:.5px solid #000;font-size:9px;padding:4px 2px;margin-top:3mm}
   table.rolltbl{width:100%;border-collapse:collapse;table-layout:fixed;font-size:8px;margin-top:3mm}
-  table.rolltbl th{background:#ebf1fa;color:#1a3a5c;border:1px solid #1a3a5c;padding:1.5mm;font-size:8px}
-  table.rolltbl td{border:.5px solid #999;padding:.9mm 1.5mm;vertical-align:middle;overflow-wrap:anywhere}
+  table.rolltbl th{border:1px solid #000;padding:1.5mm;font-size:8px}
+  table.rolltbl td{border:.4px solid #888;padding:.9mm 1.5mm;vertical-align:middle;overflow-wrap:anywhere}
   table.rolltbl td.c{text-align:center}
-  table.rolltbl td.rgn{font-weight:bold;font-size:9px}
-  table.rolltbl td.rno{font-size:13px;font-weight:bold;text-align:center;background:#f6f1de;color:#1a3a5c;border:1px solid #1a3a5c}
+  table.rolltbl td.rgn{font-size:9px}
+  table.rolltbl td.rno{font-size:13px;font-weight:bold;text-align:center;border:1px solid #000}
   table.rolltbl tbody{break-inside:avoid}
-  table.rolltbl tbody tr:first-child td{border-top:1.5px solid #1a3a5c}
-  table.rolltbl tbody tr:last-child td{border-bottom:1.5px solid #1a3a5c}
-
-  /* seating count */
-  h3.ct{text-align:center;color:#1a3a5c;font-size:15px;letter-spacing:.12em;margin:4mm 0 3mm}
+  table.rolltbl tbody tr:first-child td{border-top:1px solid #000}
+  table.rolltbl tbody tr:last-child td{border-bottom:1px solid #000}
+  h3.ct{text-align:center;font-size:15px;letter-spacing:.12em;margin:4mm 0 3mm}
   table.counttbl{margin:0 auto;border-collapse:collapse;font-size:11px;min-width:60%}
-  table.counttbl th{background:#ebf1fa;color:#1a3a5c;border:1px solid #1a3a5c;padding:5px 9px}
-  table.counttbl td{border:1px solid #999;padding:5px 9px}
+  table.counttbl th{border:1px solid #000;padding:5px 9px}
+  table.counttbl td{border:.4px solid #888;padding:5px 9px}
   table.counttbl td.c{text-align:center}
   table.counttbl td.b{font-weight:bold}
-  table.counttbl tr.tot td{font-weight:bold;background:#f6f1de;border-top:2px solid #1a3a5c}
+  table.counttbl tr.tot td{font-weight:bold;border-top:1.5px solid #000}
   .halls{text-align:center;margin-top:4mm;font-size:12px}
-
-  /* closing QR page (Display PDF) */
   .bigqr-wrap{text-align:center;padding:14mm 10mm 0}
-  .bigqr-title{font-size:30px;font-weight:bold;color:#1a3a5c}
-  .bigqr-sub{font-size:15px;color:#444;margin:6px 0 14mm}
-  .bigqr{width:130mm;margin:0 auto;padding:5mm;border:2px solid #1a3a5c;border-radius:6px}
+  .bigqr-title{font-size:30px;font-weight:bold}
+  .bigqr-sub{font-size:15px;margin:6px 0 14mm}
+  .bigqr{width:130mm;margin:0 auto;padding:5mm;border:1px solid #000;border-radius:6px}
   .bigqr svg{width:100%;height:auto;display:block}
   </style></head><body class="${isDisplay ? 'dsp' : ''}">
   <div class="toolbar"><button onclick="window.print()" style="padding:8px 16px;font-weight:bold;cursor:pointer">🖨 Print / Save as PDF</button></div>
