@@ -539,7 +539,7 @@ function backtrackPlaceUnplaced(states, unplaced){
 }
 
 const ALLOC_ALGORITHMS = {
-  column: { fn: runAllocationColumnFill, label: 'Room-by-Room Column Fill (max 3 courses/room, consecutive roll nos)' },
+  column: { fn: runAllocationColumnFill, label: 'Room-by-Room Column Fill v3 (max 3 courses/room, consecutive roll nos, no side/diagonal same-course)' },
 };
 
 // Quality metrics mirrored from the repo's report: Distribution Score (avg. distinct subjects
