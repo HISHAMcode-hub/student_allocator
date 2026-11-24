@@ -330,8 +330,8 @@ function finalizeAllocation(states, studentsIn){
       Nothing like 1-10 + 30-40 can happen inside a room.
    2) Seats are filled column by column, top to bottom. A course keeps going down the column and
       carries on into the next column it is allowed in, so its roll numbers stay consecutive.
-   3) Strict neighbour rule: a seat never gets the same course as its left or right neighbour.
-      (Same course directly behind in the same column is still allowed, as before.)
+   3) Strict neighbour rule: a seat never gets the same course as its left, right or any diagonal
+      neighbour. Same course straight above/below in the same column is allowed.
    4) Each room uses at most MAX_TYPES (3) courses, to keep paper collection simple. A new
       course is only brought in when the ones already in the room cannot legally take the seat.
    5) If a seat cannot be filled within those rules, it is left empty as long as there are spare
@@ -382,9 +382,17 @@ function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
       let cur = null; // course currently running down this column
       for(let r=0; r<st.R && totalRemaining(); r++){
         if(st.grid[r][c]) { cur = st.grid[r][c].course; continue; } // pre-seated (ground floor)
-        const left  = c > 0       ? st.grid[r][c-1] : null;
-        const right = c < st.C-1  ? st.grid[r][c+1] : null;
-        const clash = course => (left && left.course === course) || (right && right.course === course);
+        // Same course is only allowed straight above/below (same column). Left, right AND the
+        // four diagonal seats must all be a different course.
+        const sideCells = [];
+        for(const nc of [c-1, c+1]){
+          if(nc < 0 || nc >= st.C) continue;
+          for(const nr of [r-1, r, r+1]){
+            if(nr < 0 || nr >= st.R) continue;
+            if(st.grid[nr][nc]) sideCells.push(st.grid[nr][nc]);
+          }
+        }
+        const clash = course => sideCells.some(x => x.course === course);
         const allowed = course => !clash(course);
         const slack = freeLeft - totalRemaining(); // spare seats we may afford to leave empty
 
@@ -441,21 +449,22 @@ function backtrackPlaceUnplaced(states, unplaced){
   const MAX_DEPTH = 4;
   const placed = [];
 
+  // Seats that must not hold the same course: left, right and the four diagonals.
+  // Directly above/below (same column) is allowed.
   function neighborCells(st, r, c){
     const pts = [];
-    if(r > 0) pts.push([r-1, c]);
-    if(r < st.R-1) pts.push([r+1, c]);
-    if(c > 0) pts.push([r, c-1]);
-    if(c < st.C-1) pts.push([r, c+1]);
+    for(const nc of [c-1, c+1]){
+      if(nc < 0 || nc >= st.C) continue;
+      for(const nr of [r-1, r, r+1]){
+        if(nr < 0 || nr >= st.R) continue;
+        pts.push([nr, nc]);
+      }
+    }
     return pts;
   }
 
-  // Same-course neighbours that count as a real conflict — i.e. everything except the seat
-  // directly in front (row-1, same column). A same-course occupant there just means the new
-  // student would be seated behind their course-mate, which is fine by design.
   function conflictingNeighbors(st, r, c, course){
     return neighborCells(st, r, c).filter(([nr,nc]) => {
-      if(nr === r - 1 && nc === c) return false; // seat in front — "behind a course-mate" is allowed
       const occ = st.grid[nr][nc];
       return occ && occ.course === course;
     });
@@ -2126,7 +2135,7 @@ function printStudentList(){
   .page:last-child{page-break-after:auto}
   .band{padding:4px 2px 6px;border-bottom:1.5px solid #000}
   .band-top{display:flex;align-items:center;gap:12px;justify-content:center}
-  .band-logo,.band-logo-spacer{width:38px;height:38px;flex-shrink:0}
+  .band-logo,.band-logo-spacer{width:72px;height:72px;flex-shrink:0}
   .band-logo{object-fit:contain;filter:grayscale(1) contrast(1.2)}
   .band-titles{text-align:center;flex:1}
   .band h1{font-size:16px;letter-spacing:.03em}
@@ -2321,7 +2330,7 @@ function printExport(mode){
   @media print{.toolbar{display:none}}
   .band{position:relative;padding:4px 2px 6px;border-bottom:1.5px solid #000}
   .band-top{display:flex;align-items:center;gap:12px}
-  .band-logo{width:38px;height:38px;object-fit:contain;flex-shrink:0;filter:grayscale(1) contrast(1.2)}
+  .band-logo{width:72px;height:72px;object-fit:contain;flex-shrink:0;filter:grayscale(1) contrast(1.2)}
   .band-titles{flex:1;text-align:center}
   .clg{font-size:11px;letter-spacing:.09em}
   .dt{font-size:24px;font-weight:bold;letter-spacing:.05em;margin-top:2px}
