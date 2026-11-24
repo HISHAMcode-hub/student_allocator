@@ -323,28 +323,25 @@ function finalizeAllocation(states, studentsIn){
   return { allocation, unplaced, states };
 }
 
-/* ===================== allocation algorithm (Largest-Course Column Fill, Round-Robin Rooms) =====
-   1) Rooms sit in a circular queue. Each turn pops the front ("top") room, fills it, and — unless
-      the room is now completely full — pushes it back onto the rear of the queue. This means
-      multiple rooms fill up together in rotation rather than one room being completed before the
-      next is touched.
-   2) Each turn fills up to two whole columns of the popped room: the current largest remaining
-      course fills the room's next empty column top-to-bottom (as many of that course's students
-      as fit, capped at the room's row count), then the current second-largest remaining course
-      fills the column after that the same way.
-   3) "Largest" and "second-largest" are recomputed fresh before each column, and a course is
-      never repeated in a column immediately next to one it already occupies — strict left-right
-      anti-copying. (This is also why "second-largest" isn't just re-ranked blindly: if the same
-      course is still largest after column 1, it's explicitly skipped for column 2 in favor of the
-      true next-different course.) Once a course empties, whichever course is now next-in-line
-      takes its place — this is what "bring in the third-largest course once the second-largest
-      empties" means in practice; it falls out of the avoid-adjacent-course rule automatically.
-      The only time the same course can end up in adjacent columns is when it's the sole course
-      with students left — an unavoidable last resort, not the normal case.
-   4) A room that becomes completely full is dropped from the queue instead of being requeued —
-      the next room in the circular queue becomes "top" and the same procedure repeats. This
-      continues until every student is seated or every room is full.
+/* ===================== allocation algorithm (Room-by-Room, max 3 courses, contiguous roll nos) =====
+   1) Rooms are filled ONE AT A TIME, in order. Because no other room touches a course while the
+      current room is being filled, every course takes a single unbroken run of its
+      register-number-sorted list in each room (e.g. roll 1-20 in room 1, 21-41 in room 2, ...).
+      Nothing like 1-10 + 30-40 can happen inside a room.
+   2) Seats are filled column by column, top to bottom. A course keeps going down the column and
+      carries on into the next column it is allowed in, so its roll numbers stay consecutive.
+   3) Strict neighbour rule: a seat never gets the same course as its left or right neighbour.
+      (Same course directly behind in the same column is still allowed, as before.)
+   4) Each room uses at most MAX_TYPES (3) courses, to keep paper collection simple. A new
+      course is only brought in when the ones already in the room cannot legally take the seat.
+   5) If a seat cannot be filled within those rules, it is left empty as long as there are spare
+      seats overall. Only when seats are tight (every remaining seat is needed) is the 3-course cap
+      relaxed - this happens naturally in the last room(s), where leftover small courses get dumped
+      together. The neighbour rule is never relaxed; anyone who still cannot be seated is reported
+      as unplaced.
 =================================================================================================== */
+const MAX_TYPES = 3;
+
 function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
   const courseOrder = [];
   const courseGroups = {};
@@ -352,85 +349,68 @@ function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
     if(!courseGroups[s.course]){ courseGroups[s.course] = []; courseOrder.push(s.course); }
     courseGroups[s.course].push(s);
   });
-  // Sort each course's students by register number (natural/numeric-aware) instead of
-  // shuffling. The column-fill loop below seats a course's students top-to-bottom down a
-  // column in this order, so consecutive reg. nos. (e.g. 21CS001, 21CS002, ...) end up in
-  // adjacent seats of the same column — making it fast to sort/collect answer scripts in
-  // serial order after the exam.
   courseOrder.forEach(c => courseGroups[c].sort((a,b) =>
     a.regno.localeCompare(b.regno, undefined, { numeric: true, sensitivity: 'base' })
   ));
 
-  function remainingCoursesDesc(){
-    return courseOrder.filter(c => courseGroups[c].length > 0).sort((a,b) => courseGroups[b].length - courseGroups[a].length);
-  }
-
-  // Build each room's grid state (honoring any ground-floor preset already seated into it) and
-  // work out which column its column-fill should resume from — the first column that isn't
-  // already completely occupied.
-  const states = roomsIn.map(room => {
-    const st = freshState(room, presetStates);
-    let col = 0;
-    while(col < st.C && st.grid.every(rowArr => rowArr[col])) col++;
-    st.nextCol = col;
-    return st;
-  });
-
-  // Courses actually seated in a given column of a room (usually one course, but can be more
-  // than one where a ground-floor preset pass and this pass both contributed to the same
-  // column). Used to strictly forbid seating that same course immediately to its right.
-  function coursesInColumn(st, col){
-    const set = new Set();
-    if(col < 0) return set;
-    for(let r=0; r<st.R; r++){
-      const s = st.grid[r][col];
-      if(s) set.add(s.course);
+  const remainingOf = c => courseGroups[c].length;
+  const totalRemaining = () => courseOrder.reduce((n,c) => n + courseGroups[c].length, 0);
+  // Largest remaining course among `pool` that is allowed at this seat (null if none).
+  function largest(pool, ok){
+    let best = null;
+    for(const c of pool){
+      if(remainingOf(c) <= 0 || !ok(c)) continue;
+      if(best === null || remainingOf(c) > remainingOf(best)) best = c;
     }
-    return set;
+    return best;
   }
 
-  // Picks the largest remaining course that isn't already sitting in the immediately-left
-  // column. Only falls back to a course in that avoid-set if literally nothing else remains
-  // (i.e. seating would otherwise stall with students left over) — a strict anti-copying rule,
-  // relaxed only when unavoidable.
-  function pickCourseAvoiding(avoidSet){
-    const remain = remainingCoursesDesc();
-    for(const c of remain){ if(!avoidSet.has(c)) return c; }
-    return remain[0] || null;
-  }
+  const states = roomsIn.map(room => freshState(room, presetStates));
 
-  function fillNextColumn(st){
-    const col = st.nextCol;
-    const course = pickCourseAvoiding(coursesInColumn(st, col-1));
-    if(course){
-      const list = courseGroups[course];
-      for(let r=0; r<st.R && list.length; r++){
-        if(st.grid[r][col]) continue; // seat already taken by a preset (ground-floor) pass
-        const student = list.shift();
-        st.grid[r][col] = student;
-        st.seatsFilled++;
-        st.placedInRoom[course] = (st.placedInRoom[course] || 0) + 1;
+  // Seats still open anywhere (this seat and everything after it) - used to decide whether an
+  // empty seat can be afforded.
+  let freeLeft = 0;
+  states.forEach(st => st.grid.forEach(row => row.forEach(cell => { if(!cell) freeLeft++; })));
+
+  for(const st of states){
+    if(!totalRemaining()) break;
+    // Courses already seated in this room (e.g. by the ground-floor pass) count towards the cap.
+    const used = new Set();
+    st.grid.forEach(row => row.forEach(cell => { if(cell) used.add(cell.course); }));
+
+    for(let c=0; c<st.C && totalRemaining(); c++){
+      let cur = null; // course currently running down this column
+      for(let r=0; r<st.R && totalRemaining(); r++){
+        if(st.grid[r][c]) { cur = st.grid[r][c].course; continue; } // pre-seated (ground floor)
+        const left  = c > 0       ? st.grid[r][c-1] : null;
+        const right = c < st.C-1  ? st.grid[r][c+1] : null;
+        const clash = course => (left && left.course === course) || (right && right.course === course);
+        const allowed = course => !clash(course);
+        const slack = freeLeft - totalRemaining(); // spare seats we may afford to leave empty
+
+        let pick = null;
+        // a) keep the column's current course going (keeps roll numbers consecutive)
+        if(cur && remainingOf(cur) > 0 && allowed(cur)) pick = cur;
+        // b) another course already in this room
+        if(pick === null) pick = largest([...used], allowed);
+        // c) bring in a new course while the room has fewer than 3
+        if(pick === null && used.size < MAX_TYPES) pick = largest(courseOrder.filter(x => !used.has(x)), allowed);
+        // d) cap would be exceeded: leave the seat empty if spare seats exist, else relax the cap
+        if(pick === null && slack <= 0) pick = largest(courseOrder, allowed);
+
+        if(pick !== null){
+          const student = courseGroups[pick].shift();
+          st.grid[r][c] = student;
+          st.seatsFilled++;
+          st.placedInRoom[pick] = (st.placedInRoom[pick] || 0) + 1;
+          used.add(pick);
+          cur = pick;
+        } else {
+          cur = null; // seat left empty
+        }
+        freeLeft--;
       }
     }
-    st.nextCol++;
-  }
-
-  // Circular queue of rooms that still have at least one empty column, in the order the rooms
-  // were provided.
-  let queue = states.filter(st => st.nextCol < st.C);
-
-  while(queue.length && remainingCoursesDesc().length){
-    const st = queue.shift(); // take top room
-    if(st.nextCol >= st.C) continue; // already full (defensive; shouldn't occur)
-
-    fillNextColumn(st); // current largest remaining course not equal to the column on its left
-
-    if(st.nextCol < st.C && remainingCoursesDesc().length){
-      fillNextColumn(st); // current largest remaining course not equal to the column just placed
-    }
-
-    if(st.nextCol < st.C) queue.push(st); // room not yet full: rejoin the rear (round robin)
-    // else: room is full, drop it — the next room in the queue becomes "top"
   }
 
   return finalizeAllocation(states, studentsIn);
@@ -550,7 +530,7 @@ function backtrackPlaceUnplaced(states, unplaced){
 }
 
 const ALLOC_ALGORITHMS = {
-  column: { fn: runAllocationColumnFill, label: 'Largest-Course Column Fill (Round-Robin Rooms)' },
+  column: { fn: runAllocationColumnFill, label: 'Room-by-Room Column Fill (max 3 courses/room, consecutive roll nos)' },
 };
 
 // Quality metrics mirrored from the repo's report: Distribution Score (avg. distinct subjects
