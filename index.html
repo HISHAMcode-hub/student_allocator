@@ -342,6 +342,24 @@ function finalizeAllocation(states, studentsIn){
 =================================================================================================== */
 const MAX_TYPES = 3;
 
+// Derives the day-to-day variation from the exam date (+ FN/AN session). The same date and
+// session always give the same layout, so re-running an allocation is repeatable. With no
+// exam date set, nothing is varied (original behaviour).
+function dayVariation(){
+  const t = examDate ? Date.parse(examDate + 'T00:00:00Z') : NaN;
+  if(isNaN(t)) return { active: false, mirror: false, frac: () => 0 };
+  const dayNum = Math.floor(t / 86400000);
+  const an = examSession === 'AN' ? 1 : 0;
+  const key = dayNum * 2 + an;
+  const frac = course => {            // stable pseudo-random number in [0,1) per course per day
+    let h = 2166136261;
+    const str = course + '|' + key;
+    for(let i = 0; i < str.length; i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return h / 4294967296;
+  };
+  return { active: true, mirror: (dayNum + an) % 2 === 1, frac };
+}
+
 function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
   const courseOrder = [];
   const courseGroups = {};
@@ -352,6 +370,17 @@ function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
   courseOrder.forEach(c => courseGroups[c].sort((a,b) =>
     a.regno.localeCompare(b.regno, undefined, { numeric: true, sensitivity: 'base' })
   ));
+  // Day-to-day variation: start each course's roll-number run at a different point (wrapping
+  // round) and, on alternate days, fill the columns right-to-left. Without this the same
+  // students end up beside each other on every exam day.
+  const variation = dayVariation();
+  if(variation.active){
+    courseOrder.forEach(c => {
+      const list = courseGroups[c];
+      const k = Math.floor(variation.frac(c) * list.length);
+      if(k > 0) courseGroups[c] = list.slice(k).concat(list.slice(0, k));
+    });
+  }
 
   const remainingOf = c => courseGroups[c].length;
   const totalRemaining = () => courseOrder.reduce((n,c) => n + courseGroups[c].length, 0);
@@ -378,7 +407,10 @@ function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
     const used = new Set();
     st.grid.forEach(row => row.forEach(cell => { if(cell) used.add(cell.course); }));
 
-    for(let c=0; c<st.C && totalRemaining(); c++){
+    const colOrder = Array.from({length: st.C}, (_, i) => i);
+    if(variation.mirror) colOrder.reverse();
+    for(const c of colOrder){
+      if(!totalRemaining()) break;
       let cur = null; // course currently running down this column
       for(let r=0; r<st.R && totalRemaining(); r++){
         if(st.grid[r][c]) { cur = st.grid[r][c].course; continue; } // pre-seated (ground floor)
@@ -539,7 +571,7 @@ function backtrackPlaceUnplaced(states, unplaced){
 }
 
 const ALLOC_ALGORITHMS = {
-  column: { fn: runAllocationColumnFill, label: 'Room-by-Room Column Fill v3 (max 3 courses/room, consecutive roll nos, no side/diagonal same-course)' },
+  column: { fn: runAllocationColumnFill, label: 'Room-by-Room Column Fill (max 3 courses/room, consecutive roll nos)' },
 };
 
 // Quality metrics mirrored from the repo's report: Distribution Score (avg. distinct subjects
@@ -2022,7 +2054,8 @@ function buildAllRoomsQr(allocation){
     const qr = qrcode(0, 'L');
     qr.addData(base + '#a=' + encodeAll(allocation), 'Byte');
     qr.make();
-    return { svg: qr.createSvgTag({ cellSize:2, margin:0, scalable:true }) };
+    // margin = 4 modules (8px at cellSize 2): the quiet zone scanners need to lock on quickly
+    return { svg: qr.createSvgTag({ cellSize:2, margin:8, scalable:true }), modules: qr.getModuleCount() };
   }catch(e){
     return { err: 'There is too much seating data to fit in one QR code (roughly 600 students is the limit), so the QR code was left out.' };
   }
@@ -2170,10 +2203,10 @@ function printExport(mode){
   const isDisplay = mode === 'display';
   if(!run) return;
   // One QR code (same everywhere) covering all rooms — Display PDF only.
-  let qrSvg = '';
+  let qrSvg = '', qrModules = 0;
   if(isDisplay && includeQr){
     const q = buildAllRoomsQr(run.allocation || []);
-    if(q.svg) qrSvg = q.svg;
+    if(q.svg){ qrSvg = q.svg; qrModules = q.modules || 0; }
     else if(!confirm(q.err + '\n\nPrint the Display PDF without a QR code?')) return;
   }
   const { allocation, courses } = buildDisplayAllocation();
@@ -2182,6 +2215,9 @@ function printExport(mode){
   allocation.forEach(rd => rd.seats.forEach(s => { if(s.course && s.subject && !subjName[s.course]) subjName[s.course] = s.subject; }));
   const seatAt = (rd, r, c) => rd.seats.find(s => s.row_idx === r && s.col_idx === c);
 
+  // The QR holds all seating data, so it gets dense with many students. In the 34 mm header
+  // spot each square must stay >= ~0.34 mm to scan quickly; beyond that, point to the big QR instead.
+  const headerQrOk = !!qrSvg && (qrModules + 8) <= 100;
   const header = (withQr) => `
   <div class="band${withQr && qrSvg ? ' hasqr' : ''}">
     <div class="band-top">
@@ -2192,7 +2228,9 @@ function printExport(mode){
         ${examName ? `<div class="en">${esc(examName)}</div>` : ''}
       </div>
     </div>
-    ${withQr && qrSvg ? `<div class="band-qr"><span class="qrtxt">Scan to find<br>your room<br>&amp; seat</span><span class="qrbox"><span class="qr">${qrSvg}</span></span></div>` : ''}
+    ${withQr && qrSvg ? (headerQrOk
+      ? `<div class="band-qr"><span class="qrtxt">Scan to find<br>your room<br>&amp; seat</span><span class="qrbox"><span class="qr">${qrSvg}</span></span></div>`
+      : `<div class="band-qr nobig"><span class="qrtxt">Scan the QR code<br>on the LAST PAGE<br>to find your<br>room &amp; seat</span></div>`) : ''}
   </div>`;
 
   /* ---------- one seating chart per room ---------- */
@@ -2335,13 +2373,14 @@ function printExport(mode){
   .clg{font-size:11px;letter-spacing:.09em}
   .dt{font-size:24px;font-weight:bold;letter-spacing:.05em;margin-top:2px}
   .en{font-size:11.5px;margin-top:2px}
-  .band.hasqr{min-height:29mm}
-  .band.hasqr .band-top{padding-right:52mm}
+  .band.hasqr{min-height:38mm}
+  .band.hasqr .band-top{padding-right:72mm}
   .band-qr{position:absolute;right:2px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:8px}
   .qrtxt{font-size:11px;font-weight:bold;line-height:1.3;text-align:right}
-  .qrbox{display:block;width:25mm;background:#fff;padding:1.2mm;flex-shrink:0}
-  .qr{display:block}
-  .qr svg{width:100%;height:auto;display:block}
+  .qrbox{display:block;width:34mm;background:#fff;padding:0;flex-shrink:0}
+  .qr{display:block;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .qr svg{width:100%;height:auto;display:block;shape-rendering:crispEdges}
+  .qr svg path,.qr svg rect{fill:#000;shape-rendering:crispEdges}
   .roomstrip{display:flex;align-items:center;justify-content:center;gap:12px;border-bottom:1px solid #000;padding:6px 14px}
   .rl{font-size:12px;letter-spacing:.22em;font-weight:bold}
   .rn{font-size:30px;font-weight:bold;padding:0 18px;border-radius:8px;line-height:1.35;border:2px solid #000}
@@ -2386,8 +2425,9 @@ function printExport(mode){
   .bigqr-wrap{text-align:center;padding:14mm 10mm 0}
   .bigqr-title{font-size:30px;font-weight:bold}
   .bigqr-sub{font-size:15px;margin:6px 0 14mm}
-  .bigqr{width:130mm;margin:0 auto;padding:5mm;border:1px solid #000;border-radius:6px}
-  .bigqr svg{width:100%;height:auto;display:block}
+  .bigqr{width:160mm;margin:0 auto;padding:0;border:1px solid #000;border-radius:6px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .bigqr svg{width:100%;height:auto;display:block;shape-rendering:crispEdges}
+  .bigqr svg path,.bigqr svg rect{fill:#000;shape-rendering:crispEdges}
   </style></head><body class="${isDisplay ? 'dsp' : ''}">
   <div class="toolbar"><button onclick="window.print()" style="padding:8px 16px;font-weight:bold;cursor:pointer">🖨 Print / Save as PDF</button></div>
   ${body}
