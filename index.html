@@ -2023,7 +2023,35 @@ function _b64urlDec(str){
   for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
   return u8;
 }
-// Every room packed into one short string: [date, [[name,session,R,C,"regno;regno;;..."],...]] -> deflate -> base64url
+// Base-43 over the QR "alphanumeric" set (no space or %, so it is URL-safe).
+// ~16 bits per 16.5 QR bits vs ~6 per 8 for base64-in-byte-mode => ~30% fewer modules.
+const B43 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ$*+-./:';
+function b43Enc(u8){
+  let out = '';
+  for(let i=0;i<u8.length;i+=2){
+    if(i+1 < u8.length){
+      const n = u8[i]*256 + u8[i+1];
+      out += B43[n%43] + B43[Math.floor(n/43)%43] + B43[Math.floor(n/1849)];
+    } else {
+      const n = u8[i];
+      out += B43[n%43] + B43[Math.floor(n/43)];
+    }
+  }
+  return out;
+}
+function b43Dec(s){
+  const out = [];
+  for(let i=0;i<s.length;i+=3){
+    const a = B43.indexOf(s[i]), b = B43.indexOf(s[i+1]);
+    if(i+2 < s.length){
+      const n = a + b*43 + B43.indexOf(s[i+2])*1849;
+      out.push(n >> 8, n & 255);
+    } else out.push(a + b*43);
+  }
+  return Uint8Array.from(out);
+}
+
+// Every room packed into one short string: [date, [[name,session,R,C,"regno;regno;;..."],...]] -> raw deflate -> base43
 // (cells are stored row-major, so the seat label A1/B3/... is worked out from the position, not stored)
 function encodeAll(allocation){
   const rooms = allocation.map(rd => {
@@ -2032,10 +2060,17 @@ function encodeAll(allocation){
     return [rd.room.name, rd.room.session||'', rd.R, rd.C, cells.join(';')];
   });
   const json = JSON.stringify([examDate||'', rooms]);
-  return _b64urlEnc(pako.deflate(new TextEncoder().encode(json), { level:9 }));
+  return b43Enc(pako.deflateRaw(new TextEncoder().encode(json), { level:9 }));
 }
-function decodeAll(str){
-  const [date, rooms] = JSON.parse(pako.inflate(_b64urlDec(str), { to:'string' }));
+// accepts the whole location.hash: "#c=..." (new) or "#a=..." (old printed QRs)
+function decodeAll(hash){
+  const tag = hash.slice(1,3);
+  let body = hash.slice(3);
+  if(tag === 'c='){ try{ body = decodeURIComponent(body); }catch(e){} body = body.toUpperCase().replace(/[^0-9A-Z$*+\-.\/:]/g,''); } // tolerate scanners that change case / percent-encode
+  const json = tag === 'c='
+    ? pako.inflateRaw(b43Dec(body), { to:'string' })
+    : pako.inflate(_b64urlDec(body), { to:'string' });
+  const [date, rooms] = JSON.parse(json);
   return { date, rooms: rooms.map(([name,session,R,C,cellStr]) => {
     const cells = cellStr.split(';');
     const seats = [];
@@ -2043,7 +2078,23 @@ function decodeAll(str){
     return { name, session, R, C, seats };
   }) };
 }
-// Returns { svg } or { err } — one QR code that covers all rooms.
+
+// Own SVG: merged horizontal runs, explicit 4-module quiet zone, white background,
+// crisp edges (the library's per-module paths leave hairline seams when printed).
+function qrToSvg(qr, quiet){
+  const n = qr.getModuleCount(), size = n + quiet*2;
+  let d = '';
+  for(let r=0;r<n;r++){
+    let c = 0;
+    while(c < n){
+      if(!qr.isDark(r,c)){ c++; continue; }
+      const s = c; while(c < n && qr.isDark(r,c)) c++;
+      d += `M${s+quiet} ${r+quiet}h${c-s}v1h-${c-s}z`;
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges"><rect width="${size}" height="${size}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+}
+// Returns { svg, modules } or { err } — one QR code that covers all rooms.
 function buildAllRoomsQr(allocation){
   if(typeof qrcode === 'undefined' || typeof pako === 'undefined')
     return { err: 'The QR / compression libraries could not be loaded (internet is needed once to load them), so the QR code was left out.' };
@@ -2051,19 +2102,26 @@ function buildAllRoomsQr(allocation){
   if(!base) return { err: 'No QR Viewer Link is set, so the QR code was left out.' };
   if(!/^https?:\/\//i.test(base)) base = 'https://' + base;
   try{
-    const qr = qrcode(0, 'L');
-    qr.addData(base + '#a=' + encodeAll(allocation), 'Byte');
+    const payload = encodeAll(allocation);
+    // Self-check: decode exactly what the QR will carry and confirm every seated student survives.
+    const want = allocation.reduce((a,rd)=>a+rd.seats.filter(x=>x.regno).length, 0);
+    const back = decodeAll('#c=' + payload);
+    const got = back.rooms.reduce((a,rm)=>a+rm.seats.filter(x=>x.regno).length, 0);
+    if(want !== got) return { err: 'QR data check failed (' + got + ' of ' + want + ' students survived encoding), so the QR code was left out.' };
+    const qr = qrcode(0, 'L');                       // L = fewest modules = biggest squares
+    qr.addData(base + '#c=', 'Byte');
+    qr.addData(payload, 'Alphanumeric');
     qr.make();
-    // margin = 4 modules (8px at cellSize 2): the quiet zone scanners need to lock on quickly
-    return { svg: qr.createSvgTag({ cellSize:2, margin:8, scalable:true }), modules: qr.getModuleCount() };
+    return { svg: qrToSvg(qr, 4), modules: qr.getModuleCount() };
   }catch(e){
-    return { err: 'There is too much seating data to fit in one QR code (roughly 600 students is the limit), so the QR code was left out.' };
+    return { err: 'There is too much seating data to fit in one QR code, so the QR code was left out.' };
   }
 }
+
 // Runs when this file is opened from the QR code (address ends in #a=...): search any register number.
 function renderViewer(){
   let d;
-  try{ d = decodeAll(location.hash.slice(3)); }
+  try{ d = decodeAll(location.hash); }
   catch(e){ document.body.innerHTML = '<p style="font-family:Arial;padding:24px">This seating link is invalid or incomplete. Please scan the QR code again.</p>'; return; }
   const all = [];
   d.rooms.forEach((rm,ri) => rm.seats.forEach((s,si) => { if(s.regno) all.push({ regno:s.regno, room:rm.name, session:rm.session, seat:s.label, ri, si }); }));
@@ -2215,11 +2273,13 @@ function printExport(mode){
   allocation.forEach(rd => rd.seats.forEach(s => { if(s.course && s.subject && !subjName[s.course]) subjName[s.course] = s.subject; }));
   const seatAt = (rd, r, c) => rd.seats.find(s => s.row_idx === r && s.col_idx === c);
 
-  // The QR holds all seating data, so it gets dense with many students. In the 34 mm header
-  // spot each square must stay >= ~0.34 mm to scan quickly; beyond that, point to the big QR instead.
-  const headerQrOk = !!qrSvg && (qrModules + 8) <= 100;
+  // qrModules excludes the quiet zone; the SVG includes 4 modules each side
+  const qrTotal = qrModules + 8;
+  // need >= ~0.5 mm per square to scan fast; otherwise point to the big QR on the last page
+  const headerQrOk = !!qrSvg && qrTotal * 0.5 <= 46;
+  const hdrW = Math.min(46, Math.max(25, qrTotal * 0.55));
   const header = (withQr) => `
-  <div class="band${withQr && qrSvg ? ' hasqr' : ''}">
+  <div class="band${withQr && headerQrOk ? ' hasqr' : ''}" style="--qrw:${hdrW.toFixed(1)}mm">
     <div class="band-top">
       <img class="band-logo" src="${COLLEGE_LOGO}" alt="">
       <div class="band-titles">
@@ -2373,14 +2433,13 @@ function printExport(mode){
   .clg{font-size:11px;letter-spacing:.09em}
   .dt{font-size:24px;font-weight:bold;letter-spacing:.05em;margin-top:2px}
   .en{font-size:11.5px;margin-top:2px}
-  .band.hasqr{min-height:38mm}
-  .band.hasqr .band-top{padding-right:72mm}
+  .band.hasqr{min-height:calc(var(--qrw,25mm) + 6mm)}
+  .band.hasqr .band-top{padding-right:calc(var(--qrw,25mm) + 28mm)}
   .band-qr{position:absolute;right:2px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:8px}
   .qrtxt{font-size:11px;font-weight:bold;line-height:1.3;text-align:right}
-  .qrbox{display:block;width:34mm;background:#fff;padding:0;flex-shrink:0}
+  .qrbox{display:block;width:var(--qrw,25mm);background:#fff;padding:0;flex-shrink:0}
   .qr{display:block;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-  .qr svg{width:100%;height:auto;display:block;shape-rendering:crispEdges}
-  .qr svg path,.qr svg rect{fill:#000;shape-rendering:crispEdges}
+  .qr svg{width:100%;height:auto;display:block;background:#fff}
   .roomstrip{display:flex;align-items:center;justify-content:center;gap:12px;border-bottom:1px solid #000;padding:6px 14px}
   .rl{font-size:12px;letter-spacing:.22em;font-weight:bold}
   .rn{font-size:30px;font-weight:bold;padding:0 18px;border-radius:8px;line-height:1.35;border:2px solid #000}
@@ -2422,14 +2481,14 @@ function printExport(mode){
   table.counttbl td.b{font-weight:bold}
   table.counttbl tr.tot td{font-weight:bold;border-top:1.5px solid #000}
   .halls{text-align:center;margin-top:4mm;font-size:12px}
-  .bigqr-wrap{text-align:center;padding:14mm 10mm 0}
+  .bigqr-wrap{text-align:center;padding:8mm 6mm 0}
   .bigqr-title{font-size:30px;font-weight:bold}
   .bigqr-sub{font-size:15px;margin:6px 0 14mm}
-  .bigqr{width:160mm;margin:0 auto;padding:0;border:1px solid #000;border-radius:6px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-  .bigqr svg{width:100%;height:auto;display:block;shape-rendering:crispEdges}
-  .bigqr svg path,.bigqr svg rect{fill:#000;shape-rendering:crispEdges}
+  .bigqr{width:176mm;margin:0 auto;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .bigqr svg{width:100%;height:auto;display:block;background:#fff}
   </style></head><body class="${isDisplay ? 'dsp' : ''}">
-  <div class="toolbar"><button onclick="window.print()" style="padding:8px 16px;font-weight:bold;cursor:pointer">🖨 Print / Save as PDF</button></div>
+  <div class="toolbar"><button onclick="window.print()" style="padding:8px 16px;font-weight:bold;cursor:pointer">🖨 Print / Save as PDF</button>
+  <span style="font-size:12px;margin-left:10px">For a scannable QR: scale <b>100%</b> (not "Fit to page"), highest quality, ink/toner-saver <b>off</b>.</span></div>
   ${body}
   </body></html>`;
 
@@ -2450,7 +2509,7 @@ function go(p){ page = p; editRoomId = null; editStudentId = null; render(); }
 document.querySelectorAll('nav.main-nav a').forEach(a => a.addEventListener('click', () => go(a.dataset.nav)));
 
 (async function boot(){
-  if(/^#a=/.test(location.hash)){ renderViewer(); return; }
+  if(/^#[ac]=/.test(location.hash)){ renderViewer(); return; }
   await loadAll();
   render();
 })();
