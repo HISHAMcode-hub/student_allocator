@@ -347,7 +347,7 @@ const MAX_TYPES = 3;
 // exam date set, nothing is varied (original behaviour).
 function dayVariation(){
   const t = examDate ? Date.parse(examDate + 'T00:00:00Z') : NaN;
-  if(isNaN(t)) return { active: false, mirror: false, frac: () => 0, rng: null };
+  if(isNaN(t)) return { active: false, mirror: false, frac: () => 0 };
   const dayNum = Math.floor(t / 86400000);
   const an = examSession === 'AN' ? 1 : 0;
   const key = dayNum * 2 + an;
@@ -357,21 +357,7 @@ function dayVariation(){
     for(let i = 0; i < str.length; i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
     return h / 4294967296;
   };
-  // Seeded PRNG (mulberry32): same date+session => same shuffle, different day => different shuffle.
-  let seed = (Math.imul(key, 2654435761) ^ 0x9E3779B9) >>> 0;
-  const rng = () => {
-    seed = (seed + 0x6D2B79F5) >>> 0;
-    let x = seed;
-    x = Math.imul(x ^ (x >>> 15), x | 1);
-    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
-    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
-  };
-  return { active: true, mirror: (dayNum + an) % 2 === 1, frac, rng };
-}
-function seededShuffle(arr, rng){
-  const a = arr.slice();
-  for(let i = a.length - 1; i > 0; i--){ const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
-  return a;
+  return { active: true, mirror: (dayNum + an) % 2 === 1, frac };
 }
 
 function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
@@ -389,9 +375,6 @@ function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
   // students end up beside each other on every exam day.
   const variation = dayVariation();
   if(variation.active){
-    // Randomise which course is queued first, so a course doesn't always land in the same rooms.
-    const shuffled = seededShuffle(courseOrder, variation.rng);
-    courseOrder.length = 0; shuffled.forEach(c => courseOrder.push(c));
     courseOrder.forEach(c => {
       const list = courseGroups[c];
       const k = Math.floor(variation.frac(c) * list.length);
@@ -418,9 +401,7 @@ function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
   let freeLeft = 0;
   states.forEach(st => st.grid.forEach(row => row.forEach(cell => { if(!cell) freeLeft++; })));
 
-  // Fill rooms in a date-seeded random order (states/output stay in original room order).
-  const fillOrder = variation.active ? seededShuffle(states, variation.rng) : states;
-  for(const st of fillOrder){
+  for(const st of states){
     if(!totalRemaining()) break;
     // Courses already seated in this room (e.g. by the ground-floor pass) count towards the cap.
     const used = new Set();
