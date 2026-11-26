@@ -347,7 +347,7 @@ const MAX_TYPES = 3;
 // exam date set, nothing is varied (original behaviour).
 function dayVariation(){
   const t = examDate ? Date.parse(examDate + 'T00:00:00Z') : NaN;
-  if(isNaN(t)) return { active: false, mirror: false, frac: () => 0 };
+  if(isNaN(t)) return { active: false, mirror: false, frac: () => 0, rng: null };
   const dayNum = Math.floor(t / 86400000);
   const an = examSession === 'AN' ? 1 : 0;
   const key = dayNum * 2 + an;
@@ -357,7 +357,21 @@ function dayVariation(){
     for(let i = 0; i < str.length; i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
     return h / 4294967296;
   };
-  return { active: true, mirror: (dayNum + an) % 2 === 1, frac };
+  // Seeded PRNG (mulberry32): same date+session => same shuffle, different day => different shuffle.
+  let seed = (Math.imul(key, 2654435761) ^ 0x9E3779B9) >>> 0;
+  const rng = () => {
+    seed = (seed + 0x6D2B79F5) >>> 0;
+    let x = seed;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+  return { active: true, mirror: (dayNum + an) % 2 === 1, frac, rng };
+}
+function seededShuffle(arr, rng){
+  const a = arr.slice();
+  for(let i = a.length - 1; i > 0; i--){ const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
 }
 
 function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
@@ -375,6 +389,9 @@ function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
   // students end up beside each other on every exam day.
   const variation = dayVariation();
   if(variation.active){
+    // Randomise which course is queued first, so a course doesn't always land in the same rooms.
+    const shuffled = seededShuffle(courseOrder, variation.rng);
+    courseOrder.length = 0; shuffled.forEach(c => courseOrder.push(c));
     courseOrder.forEach(c => {
       const list = courseGroups[c];
       const k = Math.floor(variation.frac(c) * list.length);
@@ -401,7 +418,9 @@ function runAllocationColumnFill(roomsIn, studentsIn, presetStates){
   let freeLeft = 0;
   states.forEach(st => st.grid.forEach(row => row.forEach(cell => { if(!cell) freeLeft++; })));
 
-  for(const st of states){
+  // Fill rooms in a date-seeded random order (states/output stay in original room order).
+  const fillOrder = variation.active ? seededShuffle(states, variation.rng) : states;
+  for(const st of fillOrder){
     if(!totalRemaining()) break;
     // Courses already seated in this room (e.g. by the ground-floor pass) count towards the cap.
     const used = new Set();
@@ -1280,7 +1299,7 @@ function renderAllocate(){
     </div>
     <label style="display:flex;align-items:center;gap:.5rem;font-size:.82rem;font-weight:600;margin:.2rem 0 .8rem;cursor:pointer">
       <input type="checkbox" ${includeQr ? 'checked' : ''} onchange="setIncludeQr(this.checked)" style="width:auto">
-      Include QR code in Display PDF <span style="font-weight:400;color:var(--text3)">(students scan it to find their room &amp; seat)</span>
+      Include QR code in PDFs (top-right of every page) <span style="font-weight:400;color:var(--text3)">(students scan it to find their room &amp; seat)</span>
     </label>
     <div class="row-actions">
       <button class="btn btn-primary" onclick="runAllocationClick()" ${(!roomCount||!studentCount) ? 'disabled' : ''}>⚡ Run Allocation</button>
@@ -2260,12 +2279,12 @@ function printExport(mode){
   mode = (mode === 'display') ? 'display' : 'asis';
   const isDisplay = mode === 'display';
   if(!run) return;
-  // One QR code (same everywhere) covering all rooms — Display PDF only.
+  // One QR code (same everywhere) covering all rooms — printed top-right on every page of both PDFs.
   let qrSvg = '', qrModules = 0;
-  if(isDisplay && includeQr){
+  if(includeQr){
     const q = buildAllRoomsQr(run.allocation || []);
     if(q.svg){ qrSvg = q.svg; qrModules = q.modules || 0; }
-    else if(!confirm(q.err + '\n\nPrint the Display PDF without a QR code?')) return;
+    else if(!confirm(q.err + '\n\nPrint the PDF without a QR code?')) return;
   }
   const { allocation, courses } = buildDisplayAllocation();
   const titleLine = [dotDate(examDate), examSession].filter(Boolean).join(' ');
@@ -2367,9 +2386,8 @@ function printExport(mode){
   const colgroup = '<colgroup>' + ['4','3','9.5','14','6.5','13'].concat(['4','3','9.5','14','6.5','13']).map(w => `<col style="width:${w}%">`).join('') + '</colgroup>';
   const rollPage = `
     <section class="page roll">
-      ${header(false)}
       <table class="rolltbl">${colgroup}
-        <thead><tr>${['Room No.','Sl No','Reg. No','Name','Sub code','Subject'].map(h => `<th>${h}</th>`).join('')}${['Room No.','Sl No','Reg. No','Name','Sub code','Subject'].map(h => `<th>${h}</th>`).join('')}</tr></thead>
+        <thead><tr><td colspan="12" style="border:0;padding:0">${header(true)}</td></tr><tr>${['Room No.','Sl No','Reg. No','Name','Sub code','Subject'].map(h => `<th>${h}</th>`).join('')}${['Room No.','Sl No','Reg. No','Name','Sub code','Subject'].map(h => `<th>${h}</th>`).join('')}</tr></thead>
         ${rollBody}
       </table>
     </section>`;
@@ -2387,7 +2405,7 @@ function printExport(mode){
   });
   const countPage = `
     <section class="page roll">
-      ${header(false)}
+      ${header(true)}
       <h3 class="ct">SEATING COUNT</h3>
       <table class="counttbl">
         <tr><th rowspan="2">Sl. No.</th><th rowspan="2">Room No.</th><th colspan="${codes.length}">SUBJECT CODE</th><th rowspan="2">Total</th></tr>
@@ -2398,10 +2416,10 @@ function printExport(mode){
       <p class="halls">Number of Halls: <b>${hallCount}</b></p>
     </section>`;
 
-  /* ---------- Display PDF: closing page with one big QR ---------- */
-  const qrPage = (isDisplay && qrSvg) ? `
+  /* ---------- closing page with one big QR (both PDFs) ---------- */
+  const qrPage = qrSvg ? `
     <section class="page chart qrpage">
-      ${header(false)}
+      ${header(true)}
       <div class="bigqr-wrap">
         <div class="bigqr-title">Find your room &amp; seat</div>
         <div class="bigqr-sub">Scan the QR code with your phone camera and enter your register number</div>
@@ -2411,7 +2429,7 @@ function printExport(mode){
 
   const body = isDisplay
     ? allocation.map(chartPage).join('') + qrPage
-    : rollPage + countPage + allocation.map(chartPage).join('');
+    : rollPage + countPage + allocation.map(chartPage).join('') + qrPage;
 
   const printHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${esc(exportFileName('pdf').replace(/\.pdf$/,''))}${isDisplay ? '-display' : '-asis'}</title>
   <style>
